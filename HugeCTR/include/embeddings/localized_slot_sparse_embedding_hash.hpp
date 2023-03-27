@@ -17,7 +17,9 @@
 
 #include <omp.h>
 
+#include <base/debug/logger.hpp>
 #include <common.hpp>
+#include <data_readers/multi_hot/detail/time_helper.hpp>
 #include <embeddings/embedding_data.hpp>
 #include <embeddings/sparse_embedding_functors.hpp>
 #include <utils.hpp>
@@ -59,6 +61,9 @@ class LocalizedSlotSparseEmbeddingHash : public IEmbedding {
   using NvHashTable = HashTable<TypeHashKey, size_t>;
 
  private:
+  double total_forward_time = 0.0;
+  double total_backward_time = 0.0;
+  int total_iterations = 0;
   EmbeddingData<TypeHashKey, TypeEmbeddingComp> embedding_data_;
   std::vector<LocalizedFilterKeyStorage<TypeHashKey>> filter_keys_storages_;
 
@@ -215,6 +220,7 @@ class LocalizedSlotSparseEmbeddingHash : public IEmbedding {
    * The forward propagation of embedding layer.
    */
   void forward(bool is_train) override {
+    double t_start = time_double();
 #pragma omp parallel num_threads(embedding_data_.get_resource_manager().get_local_gpu_count())
     {
       size_t i = omp_get_thread_num();
@@ -279,6 +285,15 @@ class LocalizedSlotSparseEmbeddingHash : public IEmbedding {
                             hash_value_index_tensors_, hash_table_slot_id_tensors_,
                             embedding_data_.get_resource_manager());
 
+    if (is_train) {
+      total_iterations += 1;
+      total_forward_time += time_double() - t_start;
+      if (total_iterations % 100 == 0) {
+        HCTR_LOG_S(DEBUG, WORLD) << total_iterations
+                                 << " iterations, total embedding forward time:  "
+                                 << total_forward_time << " seconds" << std::endl;
+      }
+    }
     return;
   }
 
@@ -289,6 +304,7 @@ class LocalizedSlotSparseEmbeddingHash : public IEmbedding {
   void backward() override {
     // Read dgrad from output_tensors -> compute wgrad
 
+    double t_start = time_double();
     // reorder
     functors_.backward_reorder(embedding_data_.get_batch_size_per_gpu(true),
                                embedding_data_.embedding_params_.slot_num,
@@ -336,6 +352,12 @@ class LocalizedSlotSparseEmbeddingHash : public IEmbedding {
                        embedding_data_.get_row_offsets_tensors(true), embedding_feature_tensors_,
                        wgrad_tensors_, embedding_data_.get_resource_manager());
 
+    total_backward_time += time_double() - t_start;
+    if (total_iterations % 100 == 0) {
+      HCTR_LOG_S(DEBUG, WORLD) << total_iterations
+                               << " iterations, total embedding backward time:  "
+                               << total_backward_time << " seconds" << std::endl;
+    }
     return;
   }
 
